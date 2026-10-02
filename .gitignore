@@ -1,0 +1,19 @@
+# Build output
+/wbai
+/wbai.exe
+/wbai.exe~
+/workbuddyai-setup.exe
+/workbuddyai-setup
+/dist/
+*.exe~
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Local tooling
+.workbuddy-ai/
+*.exe
+.zcode/
+.tmp/
