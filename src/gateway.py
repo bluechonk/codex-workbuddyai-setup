@@ -426,10 +426,12 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
             out.headers.add(name, value)
     await out.prepare(request)
 
-    # SSE 感知透传：按事件块（空行分隔）切分上游字节流，丢弃注释行（以 ":" 开头的
-    # 行，如上游自带的 ": keep-alive"）后再转发。不能做纯字节透传——部分客户端的
-    # SSE 解析器遇到注释行会解析失败并重置流状态，把连续的思考块切碎成多个小块。
-    # 事件数据本身原样保留，不在重组时引入额外延迟。
+    # SSE 感知透传：按事件块（空行分隔）切分上游字节流，做两处规范化后再转发：
+    # 1) 丢弃注释行（以 ":" 开头，如上游自带的 ": keep-alive"）——部分客户端的
+    #    SSE 解析器遇到注释行会解析失败并重置流状态；
+    # 2) 剔除 delta 里语义为空的字段（tool_calls: []）——否则 ZCode 会把每个
+    #    reasoning token 切成独立的思考块（详见 _normalize_data_line）。
+    # 事件数据其余部分原样保留，不在重组时引入额外延迟。
     is_sse = "text/event-stream" in content_type.lower()
     capture: list[bytes] | None = [] if os.environ.get("WBAI_DEBUG_DUMP") else None
     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -448,11 +450,42 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
 
     pump_task = asyncio.create_task(_pump())
 
-    def _strip_comment_lines(event: bytes) -> bytes:
-        lines = event.split(b"\n")
-        kept = [ln for ln in lines if not ln.startswith(b":")]
-        if len(kept) == len(lines):
-            return event
+    def _normalize_data_line(line: bytes) -> bytes:
+        """剔除 data 块里语义为空的字段（目前只有空数组 tool_calls）。
+
+        上游每个 delta 都带 "tool_calls": []。ZCode（zcode.cjs）的解析器判定
+        `delta.tool_calls != null` 就结束当前思考块，空数组导致每个 reasoning
+        token 都被切成独立的「思考」块；删除空数组（无任何信息量）即修复。
+        解析失败或无需改动的行原样返回。
+        """
+        payload = line[5:].lstrip() if line.startswith(b"data:") else line
+        if not payload or payload.startswith(b"[DONE]"):
+            return line
+        try:
+            chunk = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return line
+        changed = False
+        if isinstance(chunk, dict):
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") if isinstance(choice, dict) else None
+                if isinstance(delta, dict) and delta.get("tool_calls") == []:
+                    del delta["tool_calls"]
+                    changed = True
+        if not changed:
+            return line
+        return b"data: " + json.dumps(chunk, ensure_ascii=False, separators=(",", ":")).encode()
+
+    def _process_event(event: bytes) -> bytes | None:
+        """清洗一个 SSE 事件块：丢弃注释行（如上游自带的 ": keep-alive"）、
+        规范化 data 行；清洗后为空则返回 None（不转发）。"""
+        kept: list[bytes] = []
+        for ln in event.split(b"\n"):
+            if ln.startswith(b":"):
+                continue
+            kept.append(_normalize_data_line(ln))
+        if not any(x.strip() for x in kept):
+            return None
         return b"\n".join(kept)
 
     async def _forward_sse() -> None:
@@ -475,14 +508,16 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
                             event, buf = buf[:i], buf[i + 2 :]
                         else:
                             event, buf = buf[:n], buf[n + 4 :]
-                        cleaned = _strip_comment_lines(event)
-                        if cleaned.strip():
+                        processed = _process_event(event)
+                        if processed:
                             # 统一规范化为标准 SSE 帧（\n\n 结尾），避免 \r 残留
-                            await out.write(cleaned.rstrip(b"\r") + b"\n\n")
+                            await out.write(processed.rstrip(b"\r") + b"\n\n")
                 else:
                     await out.write(chunk)
             if buf:
-                await out.write(_strip_comment_lines(buf))
+                processed = _process_event(buf)
+                if processed:
+                    await out.write(processed)
         except (ConnectionResetError, aiohttp.ClientError, ConnectionError) as exc:
             # 客户端提前断开（如主动取消请求）属正常情况，降级为调试日志
             logger.info("客户端连接已断开，停止转发: %s", exc)
