@@ -28,8 +28,6 @@ logger = logging.getLogger("wbai")
 # 请求体上限 32MB（与 Go 版 io.LimitReader 一致）
 _MAX_BODY = 32 << 20
 _READ_CHUNK = 8192  # 单次从上游读取的字节数
-_IDLE_PING_SECONDS = 1.0  # 上游静默超过该秒数即发心跳注释
-_KEEPALIVE_PING = b": keep-alive\n\n"  # SSE 注释行，客户端忽略其内容
 
 
 # 转发响应时剔除的头：hop-by-hop 头，以及与本进程实际发出内容不一致的头
@@ -218,16 +216,12 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
             out.headers.add(name, value)
     await out.prepare(request)
 
-    # 按上游到达的原始字节透传（不改内容），并做两件事：
-    # 1) 收到即写出，不攒缓冲（攒缓冲会让客户端收到阵发数据）；
-    # 2) 上游思考停顿期间（>1 秒无数据）插入 SSE 注释心跳，
-    #    客户端会忽略注释内容，但不会把停顿当成"思考块结束"而切出新块。
-    # 心跳只对 SSE 响应启用：非流式（如 JSON）响应里插注释会破坏内容。
-    # 设 WBAI_NO_KEEPALIVE=1 可关闭心跳（排查用）。
+    # SSE 感知透传：按事件块（空行分隔）切分上游字节流，丢弃注释行（以 ":" 开头的
+    # 行，如上游自带的 ": keep-alive"）后再转发。不能做纯字节透传——部分客户端的
+    # SSE 解析器遇到注释行会解析失败并重置流状态，把连续的思考块切碎成多个小块。
+    # 事件数据本身原样保留，不在重组时引入额外延迟。
     content_type = resp.headers.get("Content-Type", "")
-    keepalive = (
-        not os.environ.get("WBAI_NO_KEEPALIVE") and "text/event-stream" in content_type.lower()
-    )
+    is_sse = "text/event-stream" in content_type.lower()
     capture: list[bytes] | None = [] if os.environ.get("WBAI_DEBUG_DUMP") else None
     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
@@ -244,29 +238,54 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
             await queue.put(None)
 
     pump_task = asyncio.create_task(_pump())
-    try:
-        while True:
-            try:
-                chunk = await asyncio.wait_for(queue.get(), timeout=_IDLE_PING_SECONDS)
-            except TimeoutError:
-                if keepalive:
-                    await out.write(_KEEPALIVE_PING)  # 断开时由外层 except 兜住
-                continue
-            if chunk is None:
-                break  # 上游结束
-            if capture is not None:
-                capture.append(chunk)
-            await out.write(chunk)
-    except (ConnectionResetError, aiohttp.ClientError, ConnectionError) as exc:
-        # 客户端提前断开（如主动取消请求）属正常情况，降级为调试日志
-        logger.info("客户端连接已断开，停止转发: %s", exc)
-    finally:
-        pump_task.cancel()
-        # close 而非 release：连接可能未读完，不能放回连接池复用
-        resp.close()
-        # 断开后 write_eof 也可能失败，忽略即可
-        with contextlib.suppress(ConnectionResetError, aiohttp.ClientError):
-            await out.write_eof()
+
+    def _strip_comment_lines(event: bytes) -> bytes:
+        lines = event.split(b"\n")
+        kept = [ln for ln in lines if not ln.startswith(b":")]
+        if len(kept) == len(lines):
+            return event
+        return b"\n".join(kept)
+
+    async def _forward_sse() -> None:
+        buf = b""
+        try:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                if capture is not None:
+                    capture.append(chunk)
+                buf += chunk
+                if is_sse:
+                    # 兼容 \n\n 与 \r\n\r\n 两种事件分隔符，取最先出现者
+                    while True:
+                        i, n = buf.find(b"\n\n"), buf.find(b"\r\n\r\n")
+                        if i < 0 and n < 0:
+                            break
+                        if n < 0 or (0 <= i < n):
+                            event, buf = buf[:i], buf[i + 2 :]
+                        else:
+                            event, buf = buf[:n], buf[n + 4 :]
+                        cleaned = _strip_comment_lines(event)
+                        if cleaned.strip():
+                            # 统一规范化为标准 SSE 帧（\n\n 结尾），避免 \r 残留
+                            await out.write(cleaned.rstrip(b"\r") + b"\n\n")
+                else:
+                    await out.write(chunk)
+            if buf:
+                await out.write(_strip_comment_lines(buf))
+        except (ConnectionResetError, aiohttp.ClientError, ConnectionError) as exc:
+            # 客户端提前断开（如主动取消请求）属正常情况，降级为调试日志
+            logger.info("客户端连接已断开，停止转发: %s", exc)
+        finally:
+            pump_task.cancel()
+            # close 而非 release：连接可能未读完，不能放回连接池复用
+            resp.close()
+            # 断开后 write_eof 也可能失败，忽略即可
+            with contextlib.suppress(ConnectionResetError, aiohttp.ClientError):
+                await out.write_eof()
+
+    await _forward_sse()
     if capture is not None:
         debug_dump("resp", "sse", b"".join(capture))
     return out
