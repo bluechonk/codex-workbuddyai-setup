@@ -7,9 +7,11 @@ import contextlib
 import json
 import logging
 import os
+import socket
 import sys
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -28,6 +30,7 @@ logger = logging.getLogger("wbai")
 # 请求体上限 32MB（与 Go 版 io.LimitReader 一致）
 _MAX_BODY = 32 << 20
 _READ_CHUNK = 8192  # 单次从上游读取的字节数
+_SESSION_MIN_AGE = 10.0  # 会话最短重建间隔（秒），防上游持续不可达时反复重建
 
 
 # 转发响应时剔除的头：hop-by-hop 头，以及与本进程实际发出内容不一致的头
@@ -49,6 +52,91 @@ _STRIP_HEADERS = {
 
 class _UpstreamUnauthorized(Exception):
     """上游拒绝了访问令牌（401/403）。"""
+
+
+class _UpstreamConnectError(RuntimeError):
+    """连接阶段失败：TCP/TLS 未建立，请求未发出，可安全重建会话重试。"""
+
+
+class _PoolResolver(aiohttp.abc.AbstractResolver):
+    """用独立（有界）线程池做 DNS 解析。
+
+    默认执行器的 getaddrinfo 一旦被网络抖动卡住，事件循环里所有新连接都会挂死、
+    只能重启进程；解析器随会话重建一起整体换新，长跑进程即可自愈。
+    线程池上限 8，旧池 discard（wait=False），不会无限膨胀。
+    """
+
+    def __init__(self) -> None:
+        self._pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="wbai-dns")
+
+    async def resolve(
+        self, host: str, port: int = 0, family: int = socket.AF_UNSPEC
+    ) -> list[aiohttp.abc.ResolveResult]:
+        loop = asyncio.get_running_loop()
+        infos = await loop.run_in_executor(
+            self._pool, socket.getaddrinfo, host, port, family, socket.SOCK_STREAM
+        )
+        return [
+            {
+                "hostname": host,
+                "host": info[4][0],
+                "port": info[4][1],
+                "family": info[0],
+                "proto": info[2],
+                "flags": 0,
+            }
+            for info in infos
+        ]
+
+    async def close(self) -> None:
+        # wait=False：即使有线程卡在 getaddrinfo，也不阻塞关闭流程
+        self._pool.shutdown(wait=False)
+
+
+def _new_session() -> aiohttp.ClientSession:
+    """新建上游会话（带独立 DNS 解析器）；trust_env=True 等价 Go 的 http.ProxyFromEnvironment。
+
+    total=None 支持无限时长流式响应，连接 5s / 读空闲 120s 与 Go 一致。
+    """
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=120)
+    connector = aiohttp.TCPConnector(resolver=_PoolResolver())
+    return aiohttp.ClientSession(timeout=timeout, trust_env=True, connector=connector)
+
+
+async def _rotate_session(app: web.Application) -> None:
+    """重建上游会话（连同 DNS 解析器），缓解长跑进程连接卡死（自愈）。
+
+    最短重建间隔 10 秒：上游持续不可达时，避免每个失败请求都重建一次。
+    """
+    async with app["session_lock"]:
+        now = time.monotonic()
+        if now - app["session_born"] < _SESSION_MIN_AGE:
+            return
+        old = app["client"]
+        app["client"] = _new_session()
+        app["session_born"] = now
+    with contextlib.suppress(Exception):
+        await old.close()
+
+
+async def _open_stream_recovering(
+    app: web.Application,
+    cfg: Any,
+    token: str,
+    uid: str,
+    body: bytes,
+) -> aiohttp.ClientResponse:
+    """发起上游流式请求；连接阶段失败时重建会话后重试一次。
+
+    连接未建立意味着请求没发出去，重试无副作用；卡死的是旧会话时，
+    这一步就能自愈（不必手动重启网关）。
+    """
+    try:
+        return await _open_stream(app["client"], cfg, token, uid, body)
+    except _UpstreamConnectError as exc:
+        logger.warning("上游连接失败，重建会话后重试: %s", exc)
+        await _rotate_session(app)
+        return await _open_stream(app["client"], cfg, token, uid, body)
 
 
 def host_of(base_url: str) -> str:
@@ -118,6 +206,9 @@ async def _open_stream(
 
     try:
         resp = await session.post(upstream.chat_url(cfg), data=body, headers=headers)
+    except (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError) as exc:
+        # 连接阶段失败（TCP/TLS 未建立，请求未发出）：交给调用方重建会话重试
+        raise _UpstreamConnectError(str(exc)) from exc
     except aiohttp.ClientError as exc:
         raise RuntimeError(f"上游请求失败: {exc}") from exc
 
@@ -233,9 +324,8 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
     except NotLoggedInError as exc:
         return write_json_error(503, "not_authenticated", f"未登录: {exc}")
 
-    session: aiohttp.ClientSession = request.app["client"]
     try:
-        resp = await _open_stream(session, cfg, c.access_token, c.uid, raw)
+        resp = await _open_stream_recovering(request.app, cfg, c.access_token, c.uid, raw)
     except _UpstreamUnauthorized:
         logger.info("token 被拒绝，尝试刷新...")
         try:
@@ -245,7 +335,7 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
             resp = None
         else:
             try:
-                resp = await _open_stream(session, cfg, c.access_token, c.uid, raw)
+                resp = await _open_stream_recovering(request.app, cfg, c.access_token, c.uid, raw)
             except _UpstreamUnauthorized:
                 resp = None
             except RuntimeError as exc:
@@ -412,10 +502,9 @@ def make_app(verbose: bool) -> web.Application:
     app["verbose"] = verbose
 
     async def _on_start(app: web.Application) -> None:
-        # trust_env=True 等价 Go 的 http.ProxyFromEnvironment；
-        # total=None 支持无限时长流式响应，连接 5s / 读空闲 120s 与 Go 一致
-        timeout = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=120)
-        app["client"] = aiohttp.ClientSession(timeout=timeout, trust_env=True)
+        app["client"] = _new_session()
+        app["session_lock"] = asyncio.Lock()
+        app["session_born"] = time.monotonic()
 
     async def _on_cleanup(app: web.Application) -> None:
         await app["client"].close()

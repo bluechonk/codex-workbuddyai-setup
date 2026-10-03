@@ -55,8 +55,8 @@ uv run python build.py
 
 ## 模型短名映射
 
-- 网关对外暴露短名：**`hy4`**、**`deepseek-flash`**（`/v1/models`、客户端配置、界面均用短名）
-- 内部转发时映射回上游 slug：`hy4 → hy4-preview-f`、`deepseek-flash → deepseek-v4.1-flash`
+- 网关对外暴露短名：**`deepseek-flash`**（`/v1/models`、客户端配置、界面均用短名）
+- 内部转发时映射回上游 slug：`deepseek-flash → deepseek-v4.1-flash`
 - 映射关系由项目根目录 `models.json` 校验（缺失时用内置默认）；未识别的模型名原样透传
 
 ## 存储
@@ -66,5 +66,5 @@ uv run python build.py
 ## 注意
 
 - WorkBuddyAI 后端只支持 streaming 响应，且首条 message 必须是 system
-- 可用模型（对外短名）：`hy4`、`deepseek-flash`
+- 可用模型（对外短名）：`deepseek-flash`
 - 网关默认地址：`http://127.0.0.1:8787`

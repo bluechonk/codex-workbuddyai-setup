@@ -1,5 +1,5 @@
 # 模型目录与别名映射。
-# 对客户端与 UI 暴露短名（如 hy4 / deepseek-flash），转发上游时映射回真实 slug。
+# 对客户端与 UI 暴露短名（如 deepseek-flash），转发上游时映射回真实 slug。
 # 配置来源是 models.json：
 #   - 每条模型的 slug 字段是上游真实模型名
 #   - 可选 alias（或 short）字段指定对外短名；未提供时用内置 ALIASES 兜底
@@ -14,7 +14,6 @@ from pathlib import Path
 
 # 内置兜底映射：短名 → 上游 slug
 ALIASES: dict[str, str] = {
-    "hy4": "hy4-preview-f",
     "deepseek-flash": "deepseek-v4.1-flash",
 }
 
