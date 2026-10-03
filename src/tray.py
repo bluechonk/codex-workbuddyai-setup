@@ -149,6 +149,11 @@ def _enable_dpi_awareness() -> None:
         ctypes.windll.user32.SetProcessDPIAware()
 
 
+# 最近一次 Shell_NotifyIcon(NIM_ADD) 的返回值。pystray 不检查它，而 Low 完整性
+# 级别的进程调用必然静默失败（返回 FALSE 且不抛异常），只能自己记录下来。
+_tray_add: dict[str, bool | None] = {"ok": None}
+
+
 def _patch_pystray_message_filter() -> None:
     """让 pystray 容忍 ChangeWindowMessageFilterEx 失败（Low 完整性进程必然失败）。
 
@@ -172,6 +177,29 @@ def _patch_pystray_message_filter() -> None:
                 return False
 
         pwin32.ChangeWindowMessageFilterEx = tolerant
+
+
+def _patch_pystray_notify_result() -> None:
+    """记录托盘图标注册（Shell_NotifyIcon NIM_ADD）的真实结果。
+
+    pystray 的 _show() 不检查该调用返回值：Low 完整性级别下它返回 FALSE 却不抛
+    异常，icon.visible 照样为 True——界面会把"图标根本没进通知区域"误判成托盘可用，
+    点关闭按钮后窗口一藏就再无入口。这里补上真实结果供 _setup_tray 判断。
+    """
+    if sys.platform != "win32":
+        return
+    with contextlib.suppress(Exception):
+        from pystray._util import win32 as pwin32
+
+        original = pwin32.Shell_NotifyIcon
+
+        def recording(code, data):
+            result = original(code, data)
+            if code == pwin32.NIM_ADD:
+                _tray_add["ok"] = bool(result)
+            return result
+
+        pwin32.Shell_NotifyIcon = recording
 
 
 class GatewayWindow:
@@ -1059,6 +1087,7 @@ def run_gui(addr: str, verbose: bool, force_login: bool = False) -> None:
     """
     _enable_dpi_awareness()
     _patch_pystray_message_filter()
+    _patch_pystray_notify_result()
 
     import pystray
 
@@ -1098,14 +1127,21 @@ def run_gui(addr: str, verbose: bool, force_login: bool = False) -> None:
         """pystray 主循环就绪后的回调（独立线程）：注册图标并回报可用性。
 
         传了自定义 setup 就必须自己设 visible——pystray 只在默认 setup 里设。
-        Shell_NotifyIcon 失败（被安全软件拦截等）同样要降级为"无托盘"。
+        Shell_NotifyIcon 失败不抛异常（Low 完整性级别下必然返回 FALSE 且静默），
+        必须查真实结果，否则界面会把"图标没进通知区域"当成托盘可用，
+        点关闭按钮后窗口一藏就再无入口。
         """
         try:
             icon.visible = True
-            win.tray_available = True
         except BaseException:
             win.tray_available = False
             logger.error("托盘图标注册失败，关闭窗口将直接退出", exc_info=True)
+            return
+        if _tray_add["ok"] is False:
+            win.tray_available = False
+            logger.error("托盘图标未进入通知区域（Shell_NotifyIcon 返回失败），关闭窗口将直接退出")
+            return
+        win.tray_available = True
 
     def _run_tray() -> None:
         """托盘图标线程：创建失败必须让界面知道。
