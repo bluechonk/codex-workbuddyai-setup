@@ -134,6 +134,52 @@ async def _open_stream(
     return resp
 
 
+def _aggregate_chat_sse(buf: bytes) -> dict:
+    """把上游的 SSE 流聚合为标准 OpenAI chat.completion JSON（非流式响应用）。"""
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    finish = ""
+    mid, mmodel, created = "", "", 0
+    usage: dict[str, Any] | None = None
+    for block in buf.split(b"\n\n"):
+        for line in block.split(b"\n"):
+            if not line.startswith(b"data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == b"[DONE]":
+                continue
+            try:
+                chunk = json.loads(data)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            mid = chunk.get("id") or mid
+            mmodel = chunk.get("model") or mmodel
+            created = chunk.get("created") or created
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            for ch in chunk.get("choices") or []:
+                delta = ch.get("delta") or {}
+                c = delta.get("content")
+                if c:
+                    content_parts.append(c)
+                r = delta.get("reasoning_content") or delta.get("reasoning")
+                if r:
+                    reasoning_parts.append(r)
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    return {
+        "id": mid or "chatcmpl-gateway",
+        "object": "chat.completion",
+        "created": created,
+        "model": mmodel,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish or "stop"}],
+        "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
 async def proxy_chat(request: web.Request) -> web.StreamResponse:
     if request.method != "POST":
         return write_json_error(405, "method_not_allowed", "use POST")
@@ -166,13 +212,20 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
     verbose: bool = request.app["verbose"]
     # 对外暴露短名，内部映射回上游 slug（未知名称原样透传）
     upstream_model = catalog.resolve_model(model)
-    if upstream_model != model:
-        if verbose:
-            logger.info("模型映射: %s -> %s", model, upstream_model)
-        req["model"] = upstream_model
-        raw = json.dumps(req, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if upstream_model != model and verbose:
+        logger.info("模型映射: %s -> %s", model, upstream_model)
+    req["model"] = upstream_model
+    # 上游约束 1：首条消息必须是 system（否则 400 "first message is not system prompt"），
+    # 客户端没带就注入默认系统提示词
+    if not isinstance(messages[0], dict) or messages[0].get("role") != "system":
+        req["messages"] = [{"role": "system", "content": "You are a helpful assistant."}] + messages
+    # 上游约束 2：只支持流式（否则 400 "Non-stream chat request is currently not supported"）。
+    # 客户端要非流式时，向上游要流式，聚合后以普通 JSON 返回
+    want_stream = bool(req.get("stream"))
+    req["stream"] = True
+    raw = json.dumps(req, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if verbose:
-        logger.info("代理请求: model=%s", upstream_model)
+        logger.info("代理请求: model=%s stream=%s", upstream_model, want_stream)
     debug_dump("req", "json", raw)
 
     try:
@@ -209,6 +262,29 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
             "WorkBuddyAI 拒绝了 token 且刷新失败，请在网关窗口中重新登录",
         )
 
+    content_type = resp.headers.get("Content-Type", "")
+
+    # 非流式请求：消费完整上游 SSE，聚合成一个 chat.completion JSON 返回
+    if not want_stream:
+        buf = bytearray()
+        capture: list[bytes] | None = [] if os.environ.get("WBAI_DEBUG_DUMP") else None
+        try:
+            while True:
+                chunk = await resp.content.read(_READ_CHUNK)
+                if not chunk:
+                    break
+                if capture is not None:
+                    capture.append(chunk)
+                buf += chunk
+        except (aiohttp.ClientError, ConnectionError) as exc:
+            logger.error("读取上游响应中断: %s", exc)
+            return write_json_error(502, "upstream_error", "上游请求失败，请查看网关日志")
+        finally:
+            resp.close()
+        if capture is not None:
+            debug_dump("resp", "sse", b"".join(capture))
+        return web.json_response(_aggregate_chat_sse(bytes(buf)))
+
     # 复制上游响应头（剔除 hop-by-hop 与已失效头），状态码透传
     out = web.StreamResponse(status=resp.status)
     for name, value in resp.headers.items():
@@ -220,7 +296,6 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
     # 行，如上游自带的 ": keep-alive"）后再转发。不能做纯字节透传——部分客户端的
     # SSE 解析器遇到注释行会解析失败并重置流状态，把连续的思考块切碎成多个小块。
     # 事件数据本身原样保留，不在重组时引入额外延迟。
-    content_type = resp.headers.get("Content-Type", "")
     is_sse = "text/event-stream" in content_type.lower()
     capture: list[bytes] | None = [] if os.environ.get("WBAI_DEBUG_DUMP") else None
     queue: asyncio.Queue[bytes | None] = asyncio.Queue()

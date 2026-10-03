@@ -320,7 +320,7 @@ class GatewayWindow:
         self._models_box = tk.Frame(frm, bg=p["bg"])
         self._models_label = tk.Label(
             self._models_box,
-            text="可用模型（点击复制）",
+            text='可用模型（点名称复制，点「测试」发"回复OK"验证链路）',
             font=("Microsoft YaHei", 9),
             fg=p["sub"],
             bg=p["bg"],
@@ -717,12 +717,12 @@ class GatewayWindow:
             self._fit_window()
 
     def _render_models(self, ids: list[str]) -> None:
-        """按给定 ID 列表重建模型按钮；空列表显示加载态。
+        """按给定 ID 列表重建模型区；空列表显示加载态。
 
-        按钮按可用宽度自动换行（模型增多时占多行，而不是撑出窗口）。
+        每个模型独占一行：左侧模型名（点击复制），右侧「测试」按钮
+        （向上游发一个"只回复 OK"的最小请求，验证整条链路）。
         """
         tk, p = self.tk, self.p
-        from tkinter import font as tkfont
 
         for w in self.btns.winfo_children():
             w.destroy()
@@ -737,18 +737,10 @@ class GatewayWindow:
             ).pack(anchor="w")
             return
         self._models_loaded = True
-        # 可用的按钮区宽度：窗口宽 - 两侧内边距；用实际字体度量估算每个按钮占宽
-        avail = self.WIN_W - 2 * 24 - 8
-        measure = tkfont.Font(family="Consolas", size=10).measure
-        row = tk.Frame(self.btns, bg=p["bg"])
-        row.pack(anchor="w", fill="x")
-        used = 0
-        for mid in ids:
-            width = measure(mid) + 28  # 文本 + padx*2 + 描边
-            if used and used + width > avail:  # 放不下就换行
-                row = tk.Frame(self.btns, bg=p["bg"])
-                row.pack(anchor="w", fill="x", pady=(6, 0))
-                used = 0
+        for i, mid in enumerate(ids):
+            row = tk.Frame(self.btns, bg=p["bg"])
+            row.pack(anchor="w", fill="x", pady=(0 if i == 0 else 6, 0))
+
             btn = tk.Button(
                 row,
                 text=mid,
@@ -768,8 +760,57 @@ class GatewayWindow:
             btn.configure(command=lambda mid=mid, b=btn: self.copy(mid, b))
             btn.bind("<Enter>", lambda _e, b=btn: b.configure(bg=p["hover"]))
             btn.bind("<Leave>", lambda _e, b=btn: b.configure(bg=p["btn_bg"]))
-            btn.pack(side="left", padx=(0, 6))
-            used += width + 6
+            btn.pack(side="left")
+
+            test_btn = tk.Button(
+                row,
+                text="测试",
+                font=("Microsoft YaHei", 9),
+                bg=p["btn_bg"],
+                fg=p["sub"],
+                activebackground=p["accent"],
+                activeforeground=p["accent_text"],
+                relief="flat",
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=p["card_border"],
+                padx=8,
+                pady=3,
+                cursor="hand2",
+            )
+            test_btn.configure(command=lambda mid=mid, b=test_btn: self._test_model(mid, b))
+            test_btn.bind("<Enter>", lambda _e, b=test_btn: b.configure(bg=p["hover"]))
+            test_btn.bind("<Leave>", lambda _e, b=test_btn: b.configure(bg=p["btn_bg"]))
+            test_btn.pack(side="right")
+
+    def _test_model(self, mid: str, btn: object) -> None:
+        """对单个模型发起最小链路测试（"只回复 OK"），在后台线程执行请求。"""
+        p = self.p
+        with contextlib.suppress(Exception):
+            btn.configure(text="测试中…", state="disabled")
+
+        def worker() -> None:
+            ok, detail = _model_chat_probe(self.chat_url, mid)
+
+            def apply() -> None:
+                with contextlib.suppress(Exception):
+                    btn.configure(
+                        text=("✓ OK" if ok else f"✗ {detail}"),
+                        state="normal",
+                        fg=p["ok"] if ok else p["err"],
+                    )
+                    self.root.after(
+                        6000,
+                        lambda: (
+                            btn.configure(text="测试", fg=p["sub"]),
+                            self._fit_window(),
+                        ),
+                    )
+                self._fit_window()
+
+            self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- 主循环 ----------
     def _reveal(self) -> None:
@@ -915,6 +956,45 @@ def _ensure_login_for_gui(win: GatewayWindow) -> bool:
         # 网络不通等临时问题：照常启动，运行期请求失败会自动刷新
         win.set_state("error", f"登录状态验证未通过（{exc}），仍将继续启动。")
         return True
+
+
+def _model_chat_probe(chat_url: str, model: str) -> tuple[bool, str]:
+    """最小链路测试：经本网关对指定模型发"只回复 OK"的流式请求。
+
+    走完整链路（本地 /v1/chat/completions → 上游），成功返回 (True, "OK")，
+    失败返回 (False, 简短原因)。
+    """
+    body = {
+        "model": model,
+        "stream": True,
+        "messages": [{"role": "user", "content": "只回复 OK"}],
+    }
+    try:
+        resp = requests.post(chat_url, json=body, timeout=(5, 60), stream=True)
+    except requests.RequestException as exc:
+        return False, type(exc).__name__
+    try:
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}"
+        got = False
+        with resp:
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    return True, "OK"
+                with contextlib.suppress(json.JSONDecodeError):
+                    chunk = json.loads(data)
+                    for ch in chunk.get("choices") or []:
+                        delta = ch.get("delta") or {}
+                        if delta.get("content") or delta.get("reasoning_content"):
+                            got = True
+                        if ch.get("finish_reason"):
+                            return True, "OK"
+        return (True, "OK") if got else (False, "空响应")
+    except requests.RequestException as exc:
+        return False, type(exc).__name__
 
 
 def _host_of(base_url: str) -> str:
