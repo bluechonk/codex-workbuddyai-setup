@@ -1,6 +1,6 @@
 # 托盘 + Tkinter 主窗口（前端）：右下角图标常驻，窗口深/浅色主题可切换。
-# 窗口无边框：无左上角图标与系统菜单；最小化/关闭按钮自绘在窗口右上角，
-# 两者都隐藏到托盘（真正退出走托盘菜单）。
+# 使用原生窗口栏（拖动/最小化/关闭由系统提供），其配色经 DWM 跟随应用主题；
+# 关闭按钮 = 隐藏到托盘（真正退出走托盘菜单）。
 from __future__ import annotations
 
 import contextlib
@@ -73,15 +73,10 @@ def system_theme() -> str:
         return "dark"
 
 
-def _prefs_path():
-
-    return paths.prefs_path()
-
-
 def load_theme_mode() -> str:
     """读取持久化的主题模式，默认跟随系统。"""
     try:
-        data = json.loads(_prefs_path().read_text(encoding="utf-8"))
+        data = json.loads(paths.prefs_path().read_text(encoding="utf-8"))
         mode = data.get("theme_mode")
         if mode in ("system", "dark", "light"):
             return mode
@@ -94,7 +89,7 @@ def save_theme_mode(mode: str) -> None:
 
     with contextlib.suppress(OSError):
         paths.ensure_dir()
-        _prefs_path().write_text(
+        paths.prefs_path().write_text(
             json.dumps({"theme_mode": mode}, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -152,7 +147,7 @@ def _enable_dpi_awareness() -> None:
 
 
 class GatewayWindow:
-    """主窗口：状态 + 可复制地址 + 模型列表 + 主题切换（无边框，自绘窗口按钮）。"""
+    """主窗口：状态 + 可复制地址 + 模型列表 + 主题切换（原生窗口栏，配色跟随主题）。"""
 
     WIN_W = 560
     PAD = 20
@@ -580,14 +575,10 @@ class GatewayWindow:
             self.status_var.set("● 需要登录")
             self.status_label.configure(fg=self.p["warn"])
             if self._login_since is None:
-                self._login_since = time.monotonic()  # 等待起点（用于显示已等待时长）
+                self._login_since = time.monotonic()  # 记录等待起点，用于显示已等待时长
                 self._login_bar.start(12)
             self._show_notice("需要登录 WorkBuddyAI", message, show_url=True, show_retry=True)
             self._set_models_visible(False)
-            if self._login_since is None:
-                self._login_since = time.monotonic()  # 记录等待起点，用于显示已等待时长
-                self._login_bar.pack(anchor="w", fill="x", pady=(8, 0), before=self._notice_url)
-                self._login_bar.start(12)
         elif state == "error":
             self.status_var.set("● 启动失败")
             self.status_label.configure(fg=self.p["err"])
@@ -914,7 +905,11 @@ def _ensure_login_for_gui(win: GatewayWindow) -> bool:
             upstream.fetch_models(cfg_for(c), c.access_token, c.uid)
             return True
         except Exception as exc:
-            win.set_state("error", f"凭据已失效且刷新失败（{exc}），请点「重试登录」。")
+            # 刷新失败（刷新令牌可能已被上游消费/作废）：删掉本地凭证，
+            # 让「重试登录」真正走重新登录流程，而不是重复同一条失败路径
+            with contextlib.suppress(Exception):
+                paths.credentials_path().unlink(missing_ok=True)
+            win.set_state("error", f"凭据已失效且刷新失败（{exc}），请点「重试登录」重新登录。")
             return False
     except Exception as exc:
         # 网络不通等临时问题：照常启动，运行期请求失败会自动刷新

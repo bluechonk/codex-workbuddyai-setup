@@ -197,6 +197,10 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
                 resp = await _open_stream(session, cfg, c.access_token, c.uid, raw)
             except _UpstreamUnauthorized:
                 resp = None
+            except RuntimeError as exc:
+                # 刷新成功但第二次请求仍可能失败（上游 5xx/网络错误），不能穿透成裸 500
+                logger.error("上游请求错误: %s", exc)
+                return write_json_error(502, "upstream_error", "上游请求失败，请查看网关日志")
     except RuntimeError as exc:
         logger.error("上游请求错误: %s", exc)
         return write_json_error(502, "upstream_error", "上游请求失败，请查看网关日志")
@@ -204,7 +208,7 @@ async def proxy_chat(request: web.Request) -> web.StreamResponse:
         return write_json_error(
             502,
             "upstream_unauthenticated",
-            "WorkBuddyAI 拒绝了 token 且刷新失败，请重新运行 wbai 登录",
+            "WorkBuddyAI 拒绝了 token 且刷新失败，请在网关窗口中重新登录",
         )
 
     # 复制上游响应头（剔除 hop-by-hop 与已失效头），状态码透传

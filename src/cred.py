@@ -26,7 +26,7 @@ _POLL_INTERVAL = 5  # 轮询间隔（秒）
 _MAX_LOGIN_ROUNDS = 2  # 整轮登录重试次数
 _HTTP_TIMEOUT = 30  # HTTP 超时（秒）
 
-_NOT_LOGGED_IN_MSG = "no credentials found; run `wbai` to log in and start"
+_NOT_LOGGED_IN_MSG = "no credentials found; start the gateway to log in"
 
 
 class NotLoggedInError(Exception):

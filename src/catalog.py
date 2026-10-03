@@ -43,56 +43,56 @@ def _candidate_paths() -> list[Path]:
     return paths
 
 
-def _read_catalog_file() -> tuple[list[tuple[str, str]], tuple[str, float, int] | None]:
-    """读取第一个可解析的 models.json，返回 (目录项, 缓存键)。
-
-    目录项 = [(短名, 上游 slug)]。短名优先取模型条目里的 alias 字段；
-    没有 alias 时用内置 ALIASES 按 slug 反查。两者都没有则忽略该模型。
-    """
+def _parse_catalog_file(path: Path) -> list[tuple[str, str]]:
+    """解析单个 models.json，返回 (目录项)。短名优先取模型条目里的 alias 字段；
+    没有 alias 时用内置 ALIASES 按 slug 反查。两者都没有则忽略该模型。"""
     reverse = {slug: short for short, slug in ALIASES.items()}
-    for path in _candidate_paths():
-        try:
-            stat = path.stat()
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    models = data.get("models") if isinstance(data, dict) else None
+    for model in models or []:
+        if not isinstance(model, dict):
             continue
-        entries: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        models = data.get("models") if isinstance(data, dict) else None
-        for model in models or []:
-            if not isinstance(model, dict):
-                continue
-            slug = model.get("slug")
-            if not slug:
-                continue
-            slug = str(slug)
-            short = ""
-            for field in _ALIAS_FIELDS:
-                if isinstance(model.get(field), str) and model[field].strip():
-                    short = model[field].strip()
-                    break
-            if not short:
-                short = reverse.get(slug, "")
-            if not short or short in seen:
-                continue
-            seen.add(short)
-            entries.append((short, slug))
-        key = (str(path), stat.st_mtime, stat.st_size)
-        return entries, key
-    return [], None
+        slug = model.get("slug")
+        if not slug:
+            continue
+        slug = str(slug)
+        short = ""
+        for field in _ALIAS_FIELDS:
+            if isinstance(model.get(field), str) and model[field].strip():
+                short = model[field].strip()
+                break
+        if not short:
+            short = reverse.get(slug, "")
+        if not short or short in seen:
+            continue
+        seen.add(short)
+        entries.append((short, slug))
+    return entries
 
 
 def load_catalog() -> list[tuple[str, str]]:
-    """返回 [(短名, 上游 slug)]；带 (路径, mtime, 大小) 缓存。
+    """返回 [(短名, 上游 slug)]；缓存键为 (路径, mtime, 大小)。
 
-    文件缺失/损坏、或文件里没有任何可用模型时，退回内置 ALIASES。
+    先 stat 比对缓存键，未变化直接返回缓存（不读盘不解析）；
+    变化/首次才读盘解析。文件缺失/损坏、或文件里没有任何可用模型时，退回内置 ALIASES。
     """
     global _cache_key, _cache_catalog
-    entries, key = _read_catalog_file()
-    if key is not None:
+    for path in _candidate_paths():
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        key = (str(path), stat.st_mtime, stat.st_size)
         with _cache_lock:
             if key == _cache_key:
                 return list(_cache_catalog)
+        entries = _parse_catalog_file(path)
+        with _cache_lock:
             _cache_key = key
             _cache_catalog = entries or list(ALIASES.items())
             return list(_cache_catalog)
