@@ -5,7 +5,6 @@
         credentials.json   访问/刷新令牌 + uid + domain
         upstream.json      已解析的上游端点与鉴权头名称
         prefs.json         界面偏好（主题模式等）
-        gateway.log        运行日志（cli 写入）
 """
 
 from __future__ import annotations

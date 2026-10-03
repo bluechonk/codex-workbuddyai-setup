@@ -10,7 +10,7 @@ WorkBuddyAI 的本地 OpenAI Chat Completion 透明代理网关（Python 版）�
 - **OpenAI 兼容**：提供 `/v1/chat/completions` 和 `/v1/models` 端点
 - **一体式启动**：自动检查登录状态，失效自动刷新，必要时触发浏览器登录
 - **端口自愈**：默认端口被自身残留实例占用时自动接管，第三方进程需确认
-- **SSE 平滑转发**：逐行 Flush，思考流不再碎片化
+- **SSE 事件块转发**：按事件块转发并剥离注释行，思考流不再碎片化
 
 ## 界面
 
@@ -22,6 +22,9 @@ WorkBuddyAI 的本地 OpenAI Chat Completion 透明代理网关（Python 版）�
 登录成功后自动启动网关；启动失败（如端口被占用）也会在窗口里给出原因与
 重试入口——无需查看控制台。
 
+托盘图标注册失败时（安全软件拦截等）窗口会提示「托盘不可用」，此时关闭窗口
+直接退出程序，不会把进程留在没有入口的后台。
+
 ![需要登录](docs/login.png)
 
 | 深色模式 | 浅色模式 |
@@ -30,7 +33,7 @@ WorkBuddyAI 的本地 OpenAI Chat Completion 透明代理网关（Python 版）�
 
 ## 快速开始
 
-双击 `dist/workbuddyai-gateway-<版本号>.exe`，或源码运行：
+双击 `dist/workbuddyai-gateway-<版本号>/workbuddyai-gateway-<版本号>.exe`，或源码运行：
 
 ```bash
 uv sync

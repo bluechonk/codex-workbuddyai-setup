@@ -4,5 +4,5 @@ __pycache__/
 dist/
 build/
 .tmp/
-.pyplanning/
 .planning/
+.ruff_cache/

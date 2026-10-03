@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import queue
 import sys
 import threading
@@ -15,6 +16,8 @@ import requests
 
 import paths
 from portfree import display_base
+
+logger = logging.getLogger("wbai")
 
 # ---------------- 主题 ----------------
 DARK = {
@@ -146,6 +149,31 @@ def _enable_dpi_awareness() -> None:
         ctypes.windll.user32.SetProcessDPIAware()
 
 
+def _patch_pystray_message_filter() -> None:
+    """让 pystray 容忍 ChangeWindowMessageFilterEx 失败（Low 完整性进程必然失败）。
+
+    Windows 规定完整性级别 ≤ Low 的进程调用该 API 一律返回 ERROR_ACCESS_DENIED
+    （MSDN 明确写明），而 pystray 的 errcheck 把返回 False 当致命错误抛出：
+    托盘窗口创建失败 → 后台线程静默退出 → 图标永远不出现，且进程照常在跑。
+    该调用只为在 Explorer 重启后收到 WM_TASKBARCREATED，与图标能否显示无关，
+    失败时降级即可（代价是 Explorer 重启后需重开本程序恢复图标）。
+    """
+    if sys.platform != "win32":
+        return
+    with contextlib.suppress(Exception):
+        from pystray._util import win32 as pwin32
+
+        original = pwin32.ChangeWindowMessageFilterEx
+
+        def tolerant(hwnd, message, action, change_filter_struct=None):
+            try:
+                return original(hwnd, message, action, change_filter_struct)
+            except OSError:
+                return False
+
+        pwin32.ChangeWindowMessageFilterEx = tolerant
+
+
 class GatewayWindow:
     """主窗口：状态 + 可复制地址 + 模型列表 + 主题切换（原生窗口栏，配色跟随主题）。"""
 
@@ -180,6 +208,10 @@ class GatewayWindow:
         self.retry_evt = threading.Event()
         self.show_evt = threading.Event()
         self.quit_evt = threading.Event()
+        # 托盘是否可用：None=尚未确定（图标线程仍在启动）；False=创建失败，
+        # 此时关闭窗口必须真正退出，不能把进程留在无入口的后台（见 hide_to_tray）
+        self.tray_available: bool | None = None
+        self._tray_recovery_done = False  # 托盘失联兜底只执行一次
         self.on_theme_change: Callable[[], None] = lambda: None
 
         self.root = tk.Tk()
@@ -509,7 +541,14 @@ class GatewayWindow:
 
     # ---------- 交互 ----------
     def hide_to_tray(self) -> None:
-        """最小化/关闭统一行为：隐藏到托盘，网关继续运行。"""
+        """关闭按钮行为：有托盘则隐藏到托盘，托盘不可用则真正退出。
+
+        托盘不可用时若只隐藏窗口，进程会变成"还在跑但没有任何入口"的后台常驻
+        （用户只能去任务管理器结束），所以这种情况必须直接退出。
+        """
+        if self.tray_available is False:
+            self.quit_evt.set()
+            return
         self.root.withdraw()
 
     def copy(self, text: str, source: object | None = None) -> None:
@@ -842,6 +881,14 @@ class GatewayWindow:
         if self.quit_evt.is_set():
             self.root.destroy()
             return
+        # 托盘不可用却已隐藏窗口（用户在托盘就绪前就点了关闭）：窗口会永久失联，
+        # 这里兜底重新显示，让用户仍能操作窗口（关闭按钮此时会直接退出）。
+        # 只做一次——_reveal 会抢焦点，反复触发会每秒抢一次焦点。
+        if self.tray_available is False and not self._tray_recovery_done:
+            self._tray_recovery_done = True
+            if not self.root.winfo_viewable():
+                self._reveal()
+                self._toast("托盘不可用，关闭窗口将退出程序")
         if self.show_evt.is_set():
             self.show_evt.clear()
             self._reveal()
@@ -1011,6 +1058,7 @@ def run_gui(addr: str, verbose: bool, force_login: bool = False) -> None:
     而不是双击后什么也不显示。
     """
     _enable_dpi_awareness()
+    _patch_pystray_message_filter()
 
     import pystray
 
@@ -1045,7 +1093,33 @@ def run_gui(addr: str, verbose: bool, force_login: bool = False) -> None:
 
     win.on_theme_change = _sync_theme
     _apply_menu_theme(win.theme)
-    threading.Thread(target=icon.run, daemon=True).start()
+
+    def _setup_tray(icon: object) -> None:
+        """pystray 主循环就绪后的回调（独立线程）：注册图标并回报可用性。
+
+        传了自定义 setup 就必须自己设 visible——pystray 只在默认 setup 里设。
+        Shell_NotifyIcon 失败（被安全软件拦截等）同样要降级为"无托盘"。
+        """
+        try:
+            icon.visible = True
+            win.tray_available = True
+        except BaseException:
+            win.tray_available = False
+            logger.error("托盘图标注册失败，关闭窗口将直接退出", exc_info=True)
+
+    def _run_tray() -> None:
+        """托盘图标线程：创建失败必须让界面知道。
+
+        否则关闭窗口会把进程留在"还在跑但没有任何入口"的后台常驻状态，
+        用户只能去任务管理器结束（曾出现的故障）。
+        """
+        try:
+            icon.run(_setup_tray)
+        except BaseException:
+            win.tray_available = False
+            logger.error("托盘图标创建失败，关闭窗口将直接退出", exc_info=True)
+
+    threading.Thread(target=_run_tray, daemon=True).start()
 
     stop_holder: dict[str, Callable[[], None] | None] = {"stop": None}
 
