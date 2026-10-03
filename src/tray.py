@@ -909,14 +909,14 @@ class GatewayWindow:
         if self.quit_evt.is_set():
             self.root.destroy()
             return
-        # 托盘不可用却已隐藏窗口（用户在托盘就绪前就点了关闭）：窗口会永久失联，
-        # 这里兜底重新显示，让用户仍能操作窗口（关闭按钮此时会直接退出）。
-        # 只做一次——_reveal 会抢焦点，反复触发会每秒抢一次焦点。
+        # 托盘不可用：必须让用户知道，否则点关闭后要么失联、要么"莫名其妙退出"。
+        # 窗口已隐藏时还要拉回来（否则永久失联）；只做一次——_reveal 会抢焦点，
+        # 反复触发会每秒抢一次焦点。
         if self.tray_available is False and not self._tray_recovery_done:
             self._tray_recovery_done = True
             if not self.root.winfo_viewable():
                 self._reveal()
-                self._toast("托盘不可用，关闭窗口将退出程序")
+            self._toast("托盘不可用，关闭窗口将退出程序")
         if self.show_evt.is_set():
             self.show_evt.clear()
             self._reveal()
