@@ -1,0 +1,28 @@
+[project]
+name = "workbuddyai-gateway"
+version = "1.0.0"
+description = "WorkBuddyAI 的本地 OpenAI Chat Completion 透明代理网关（Python 版）"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.10",
+    "requests>=2.32",
+    "pystray>=0.19",
+    "pillow>=10.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pyinstaller>=6.10",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
