@@ -41,13 +41,17 @@ uv run python src/__main__.py    # 一体式启动：无凭证自动登录，有
 
 ## 打包
 
-使用 PyInstaller（onefile），构建配置在 `workbuddyai-gateway.spec`
-（产物名 = 项目名-版本号，版本号取自 `src/cli.py` 的 `__version__`；含 models.json 数据文件、无控制台、关闭 UPX）：
+一键构建（PyInstaller onedir + Inno Setup 安装器）：
 
 ```bash
-uv run pyinstaller workbuddyai-gateway.spec --noconfirm
-# 产物 dist/workbuddyai-gateway-<版本号>.exe（如 workbuddyai-gateway-0.1.0.exe）
+uv run python build.py
+# 产物 dist/workbuddyai-gateway-<版本号>/（免安装目录版）
+#      dist/installer/workbuddyai-gateway-<版本号>-setup.exe（安装器，用户级安装 + 快捷方式）
 ```
+
+版本号取自 `src/cli.py` 的 `__version__`；构建配置在 `workbuddyai-gateway.spec` 与
+`workbuddyai-gateway.iss`。只构建目录版不打包安装器：`uv run python build.py --skip-installer`。
+依赖：PyInstaller（dev 依赖）、Inno Setup 6（`winget install JRSoftware.InnoSetup`）。
 
 ## 模型短名映射
 
