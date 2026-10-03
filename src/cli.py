@@ -3,7 +3,7 @@ import argparse
 import contextlib
 import sys
 
-__version__ = "1.0.0"
+__version__ = "0.1.0"
 
 import catalog
 from cred import DEFAULT_BASE_URL, NotLoggedInError, load, login, refresh

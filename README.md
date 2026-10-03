@@ -55,7 +55,7 @@ uv run python src/__main__.py doctor     # 自检
 
 ```bash
 uv run pyinstaller workbuddyai-gateway.spec --noconfirm
-# 产物 dist/workbuddyai-gateway-<版本号>.exe（如 workbuddyai-gateway-1.0.0.exe）
+# 产物 dist/workbuddyai-gateway-<版本号>.exe（如 workbuddyai-gateway-0.1.0.exe）
 ```
 
 ## 模型短名映射

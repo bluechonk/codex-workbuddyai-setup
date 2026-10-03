@@ -102,7 +102,7 @@ def proc_name(pid: int) -> str:
         except (OSError, subprocess.CalledProcessError):
             return ""
         line = out.strip()
-        # CSV 形如: "workbuddyai-gateway-1.0.0.exe","12345","Console",...
+        # CSV 形如: "workbuddyai-gateway-0.1.0.exe","12345","Console",...
         i = line.find(",")
         if i <= 0:
             return ""

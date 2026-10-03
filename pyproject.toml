@@ -1,6 +1,6 @@
 [project]
 name = "workbuddyai-gateway"
-version = "1.0.0"
+version = "0.1.0"
 description = "WorkBuddyAI 的本地 OpenAI Chat Completion 透明代理网关（Python 版）"
 requires-python = ">=3.11"
 dependencies = [
