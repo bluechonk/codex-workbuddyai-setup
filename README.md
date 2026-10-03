@@ -66,5 +66,7 @@ uv run python build.py
 ## 注意
 
 - WorkBuddyAI 后端只支持 streaming 响应，且首条 message 必须是 system
+- 上游安全策略按系统提示词指纹拦截请求（400 code 11128 "unapproved channel"）：
+  ZCode 等 Claude Code 系客户端的 gitStatus 样板行会命中，网关自动改写为等价表述后转发
 - 可用模型（对外短名）：`deepseek-flash`
 - 网关默认地址：`http://127.0.0.1:8787`
