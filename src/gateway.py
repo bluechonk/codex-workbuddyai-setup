@@ -364,26 +364,6 @@ async def _serve_async(addr: str, verbose: bool, stop_event: asyncio.Event) -> N
         await runner.cleanup()
 
 
-def run(addr: str, verbose: bool) -> None:
-    """前台运行网关（控制台模式），Ctrl+C 优雅关闭。"""
-    stop_event = asyncio.Event()
-
-    def _request_stop(*_: object) -> None:
-        loop.call_soon_threadsafe(stop_event.set)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    import signal
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _request_stop, sig)
-        except NotImplementedError:  # Windows 上 add_signal_handler 不可用
-            signal.signal(sig, _request_stop)
-    loop.run_until_complete(_serve_async(addr, verbose, stop_event))
-    loop.close()
-
-
 def start_background(
     addr: str, verbose: bool, on_error: Callable[[Exception], None] | None = None
 ) -> Callable[[], None]:

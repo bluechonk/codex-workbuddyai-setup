@@ -30,23 +30,14 @@ WorkBuddyAI 的本地 OpenAI Chat Completion 透明代理网关（Python 版）�
 
 ## 快速开始
 
+双击 `dist/workbuddyai-gateway-<版本号>.exe`，或源码运行：
+
 ```bash
 uv sync
-
-uv run python src/__main__.py            # 一体式启动：无凭证自动登录，有凭证直接启动网关
-uv run python src/__main__.py doctor     # 自检
+uv run python src/__main__.py    # 一体式启动：无凭证自动登录，有凭证直接启动网关
 ```
 
-## 命令
-
-| 命令 | 作用 |
-| --- | --- |
-| `wbai tray` | 托盘模式：右下角图标常驻 + 状态窗口（**无参数启动的默认模式**） |
-| `wbai run` | 一体式启动（`--force-login` 强制重登，`--addr` 指定地址） |
-| `wbai login [--force]` | 仅浏览器登录，保存凭证 |
-| `wbai serve [--addr] [--verbose]` | 跳过登录检查，直接启动网关 |
-| `wbai doctor` | 自检凭证、上游配置与登录状态 |
-| `wbai version` | 打印版本 |
+可选参数：`--addr`（监听地址，默认 `127.0.0.1:8787`）、`--verbose`、`--force-login`（强制重新登录）。
 
 ## 打包
 
